@@ -272,27 +272,21 @@ const xdccHandlers = {
         const downloadTracker = activeDownloads.get(downloadId);
 
         if (downloadTracker && downloadTracker.socket) {
-            // Send updates at specified intervals and at 100%
-            if (progressPercent % PROGRESS_UPDATE_PERCENT === 0 || progressPercent === 100) {
-                const progressUpdate = {
-                    status: 'progress',
-                    filename: pack.filename,
-                    progress: progressPercent,
-                    received: received,
-                    total: pack.filesize
-                };
-
-                safeSocketWrite(downloadTracker.socket, progressUpdate);
-                logger.debug(`Sent progress update to client: ${progressPercent}%`);
-            }
+            const progressUpdate = {
+                status: 'progress',
+                filename: pack.filename,
+                progress: progressPercent,
+                received: received,
+                total: pack.filesize
+            };
+            safeSocketWrite(downloadTracker.socket, progressUpdate);
+            logger.debug(`Sent progress update to client: ${progressPercent}%`);
         }
     },
 
     complete: (pack) => {
-        // For Docker compatibility, no need to add a newline since we're already using console.log
         logger.info(`Completed download of ${pack.filename} to ${pack.location}`);
 
-        // Get the download tracker
         const downloadId = pack.filename + '|' + pack.port;
         const downloadTracker = activeDownloads.get(downloadId);
 
