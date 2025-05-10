@@ -265,7 +265,7 @@ const xdccHandlers = {
         const progressPercent = Math.floor((received / pack.filesize) * 100);
 
         // Log progress in the server - this should now work better with Docker
-        logger.progress(`${progressPercent}% of ${pack.filename} (${formatSize(received)}/${formatSize(pack.filesize)})`);
+        //logger.progress(`${progressPercent}% of ${pack.filename} (${formatSize(received)}/${formatSize(pack.filesize)})`);
 
         // Send progress updates to client
         const downloadId = pack.filename + '|' + pack.port;
