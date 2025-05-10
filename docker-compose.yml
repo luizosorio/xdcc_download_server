@@ -1,0 +1,14 @@
+services:
+  xdcc_download_server:
+    build: .
+    container_name: xdcc_download_server
+    restart: always
+    ports:
+      - 9838:8080
+    volumes:
+      - /path/to/downloads:/data/
+    environment:
+      - IRC_SERVER=irc.server.net
+      - IRC_NICK=your_irc_nick
+      - IRC_CHANNEL=#your_channel
+      - PROGRESS_INTERVAL=1
