@@ -26,9 +26,9 @@ dotenv.config();
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
 const FILE_DESTINATION = process.env.FILE_DESTINATION || '/data';
-const IRC_SERVER = process.env.IRC_SERVER || 'irc.rizon.net';
+const IRC_SERVER = process.env.IRC_SERVER || 'irc.site.net';
 const IRC_NICK = process.env.IRC_NICK || 'ghost_rider';
-const IRC_CHANNEL = process.env.IRC_CHANNEL || '#AnimeNSK';
+const IRC_CHANNEL = process.env.IRC_CHANNEL || '#channel';
 const PROGRESS_INTERVAL = process.env.PROGRESS_INTERVAL || 1; // Seconds
 const LOG_FILE = process.env.LOG_FILE || '/var/log/xdcc-download.log';
 const PROGRESS_UPDATE_PERCENT = process.env.PROGRESS_UPDATE_PERCENT || 5; // Send updates every 5% by default
@@ -69,12 +69,14 @@ const logger = {
         const timestamp = new Date().toISOString();
         const formattedMessage = `[${timestamp}] [${level}] ${message}\n`;
 
+        // Write to log file
         try {
             logStream.write(formattedMessage);
         } catch (err) {
             console.error(`Failed to write to log file: ${err.message}`);
         }
 
+        // Return the message for console output
         return `[${level}] ${message}`;
     },
 
@@ -101,6 +103,8 @@ const logger = {
     },
 
     progress: (message) => {
+        // Don't log progress to file on every update to avoid huge log files
+        // But still write a progress entry every 10% or when download completes
         const match = message.match(/^(\d+)%/);
         if (match) {
             const percent = parseInt(match[1], 10);
@@ -125,6 +129,7 @@ const logger = {
 function safeSocketWrite(socket, data, callback) {
     if (socket && !socket.destroyed && socket.writable) {
         try {
+            // Convert to string if object
             const responseStr = typeof data === 'object' ? JSON.stringify(data) : data.toString();
             return socket.write(responseStr, (err) => {
                 if (err) {
@@ -157,17 +162,45 @@ function safeSocketEnd(socket) {
             try {
                 socket.destroy();
             } catch (err2) {
+                // Last resort: just log the error
                 logger.error(`Also failed to destroy socket: ${err2.message}`);
             }
         }
     }
 }
 
+// Validate and sanitize directory path
+function sanitizePath(userPath) {
+    // Don't allow absolute paths starting with / or paths with ..
+    if (!userPath || typeof userPath !== 'string') {
+        return FILE_DESTINATION;
+    }
+
+    // Remove leading/trailing slashes and sanitize
+    const sanitized = path.normalize(userPath)
+        .replace(/^(\.\.[\/\\])+/, '') // Remove any attempts to go up directories
+        .replace(/^\/+/, ''); // Remove leading slashes
+
+    // Combine with base destination path
+    const fullPath = path.join(FILE_DESTINATION, sanitized);
+
+    // Make sure the directory exists
+    try {
+        fs.mkdirSync(fullPath, { recursive: true });
+        logger.debug(`Created custom download path: ${fullPath}`);
+    } catch (err) {
+        logger.error(`Failed to create download directory ${fullPath}: ${err.message}`);
+        return FILE_DESTINATION; // Fallback to default path
+    }
+
+    return fullPath;
+}
+
 // Log server startup with version info
 logger.info(`Starting XDCC Download Server`);
 logger.info(`Node.js version: ${process.version}`);
 logger.info(`Log file: ${LOG_FILE}`);
-logger.info(`Download directory: ${FILE_DESTINATION}`);
+logger.info(`Default download directory: ${FILE_DESTINATION}`);
 logger.info(`Progress format: ${DISABLE_PROGRESS_ANSI ? 'Docker-compatible (line by line)' : 'Interactive (ANSI)'}`);
 
 // Set IRC configuration
@@ -230,27 +263,36 @@ const xdccHandlers = {
 
     progress: (pack, received) => {
         const progressPercent = Math.floor((received / pack.filesize) * 100);
+
+        // Log progress in the server - this should now work better with Docker
         logger.progress(`${progressPercent}% of ${pack.filename} (${formatSize(received)}/${formatSize(pack.filesize)})`);
 
+        // Send progress updates to client
         const downloadId = pack.filename + '|' + pack.port;
         const downloadTracker = activeDownloads.get(downloadId);
 
         if (downloadTracker && downloadTracker.socket) {
-            const progressUpdate = {
-                status: 'progress',
-                filename: pack.filename,
-                progress: progressPercent,
-                received: received,
-                total: pack.filesize
-            };
-            safeSocketWrite(downloadTracker.socket, progressUpdate);
-            logger.debug(`Sent progress update to client: ${progressPercent}%`);
+            // Send updates at specified intervals and at 100%
+            if (progressPercent % PROGRESS_UPDATE_PERCENT === 0 || progressPercent === 100) {
+                const progressUpdate = {
+                    status: 'progress',
+                    filename: pack.filename,
+                    progress: progressPercent,
+                    received: received,
+                    total: pack.filesize
+                };
+
+                safeSocketWrite(downloadTracker.socket, progressUpdate);
+                logger.debug(`Sent progress update to client: ${progressPercent}%`);
+            }
         }
     },
 
     complete: (pack) => {
+        // For Docker compatibility, no need to add a newline since we're already using console.log
         logger.info(`Completed download of ${pack.filename} to ${pack.location}`);
 
+        // Get the download tracker
         const downloadId = pack.filename + '|' + pack.port;
         const downloadTracker = activeDownloads.get(downloadId);
 
@@ -369,13 +411,16 @@ const server = net.createServer((socket) => {
             requestData = ''; // Reset for potential future requests
 
             // Check required parameters
-            const { bot_name, pack_number, send_progress } = request;
+            const { bot_name, pack_number, send_progress, download_path } = request;
 
             if (!bot_name || !pack_number) {
                 throw new Error('Invalid request format. Required fields: bot_name, pack_number');
             }
 
-            logger.info(`Received request for bot ${bot_name}, pack #${pack_number}`);
+            // Sanitize and validate the download path if provided
+            const downloadPath = sanitizePath(download_path);
+
+            logger.info(`Received request for bot ${bot_name}, pack #${pack_number}${download_path ? ', custom path: '+download_path : ''}`);
 
             // Send initial response
             safeSocketWrite(socket, {
@@ -388,23 +433,27 @@ const server = net.createServer((socket) => {
             const xdccRequest = new axdcc.Request(client, {
                 pack: '#' + pack_number,
                 nick: bot_name,
-                path: FILE_DESTINATION,
+                path: downloadPath,  // Use custom path or default
                 resume: true, // Enable resume to handle interrupted downloads
                 progressInterval: PROGRESS_INTERVAL,
                 verbose: true // Enable detailed progress logging
             });
 
+            // Set up connection handler to store reference to socket
             xdccRequest.once("connect", function(pack) {
                 const downloadId = pack.filename + '|' + pack.port;
 
+                // Store information needed to respond later
                 activeDownloads.set(downloadId, {
                     socket: socket,
                     packNumber: pack_number,
                     sendProgress: send_progress === true,
                     startTime: Date.now(),
-                    request: xdccRequest
+                    request: xdccRequest,
+                    customPath: download_path
                 });
 
+                // Call the normal connect handler
                 xdccHandlers.connect(pack);
             });
 
@@ -421,9 +470,11 @@ const server = net.createServer((socket) => {
             socket.on('close', (hadError) => {
                 logger.info(`Connection from ${clientId} closed${hadError ? ' with error' : ''}`);
 
+                // If socket closed prematurely, mark it as closed but continue download
                 for (const [downloadId, tracker] of activeDownloads.entries()) {
                     if (tracker.socket === socket) {
                         logger.debug(`Marking socket as closed for download ${downloadId}`);
+                        // Keep the download going but mark socket as closed
                         tracker.socket = null;
                     }
                 }
@@ -432,7 +483,7 @@ const server = net.createServer((socket) => {
         } catch (err) {
             // If it's a JSON parsing error and we don't have complete data, wait for more
             if (err instanceof SyntaxError && !requestData.endsWith('}')) {
-                return;
+                return; // Wait for more data
             }
 
             logger.error(`Error processing request from ${clientId}: ${err.message}`);
@@ -446,6 +497,7 @@ const server = net.createServer((socket) => {
 
     socket.on('error', (err) => {
         logger.error(`Socket error from ${clientId}: ${err.message}`);
+        // Don't call end here, as it may throw again
         try {
             socket.destroy();
         } catch (err2) {
